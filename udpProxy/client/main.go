@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strconv"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/songgao/water"
 )
 
@@ -27,12 +29,18 @@ func main() {
 	}
 	setRoute()
 	buf := make([]byte, 1500)
+	set := false
 	for {
 		n, err := ifce.Read(buf)
 		if err != nil {
 			fmt.Println("tun read error")
 		}
 		if IsIPv4(buf[:n]) && IsUDP(buf[:n]) {
+			if !set {
+				src, dst := setUDPaddr(buf[:28])
+				go downlink(socket, src, dst, ifce)
+				set = true
+			}
 			CheckFragment(buf[:20])
 			ip := ParseTargetIP(buf[:20])
 			port := ParseTargetPort(buf[:28])
@@ -87,6 +95,88 @@ func ParseTargetPort(buf []byte) string {
 	port := int(Portbyte[0]) * 256
 	port += int(Portbyte[1])
 	return strconv.Itoa(port)
+}
+
+func ParseSourceIP(buf []byte) string {
+	IPbyte := buf[12:16]
+	IPstring := ""
+	for i := 0; i < 3; i++ {
+		x := int(IPbyte[i])
+		IPstring += strconv.Itoa(x)
+		IPstring += "."
+	}
+	x := int(IPbyte[3])
+	IPstring += strconv.Itoa(x)
+	return IPstring
+}
+
+func ParseSourcePort(buf []byte) string {
+	Portbyte := buf[20:22]
+	port := int(Portbyte[0]) * 256
+	port += int(Portbyte[1])
+	return strconv.Itoa(port)
+}
+
+func setUDPaddr(buf []byte) (src, dst *net.UDPAddr) {
+	targetIP := ParseTargetIP(buf)
+	targetPort := ParseTargetPort(buf)
+	targetPortInt, _ := strconv.Atoi(targetPort)
+	sourceIP := ParseSourceIP(buf)
+	sorcePort := ParseSourcePort(buf)
+	sorcePortInt, _ := strconv.Atoi(sorcePort)
+
+	src = &net.UDPAddr{
+		IP:   net.ParseIP(sourceIP),
+		Port: sorcePortInt,
+	}
+	dst = &net.UDPAddr{
+		IP:   net.ParseIP(targetIP),
+		Port: targetPortInt,
+	}
+	return src, dst
+}
+
+func buildUDPPacket(dst, src *net.UDPAddr, data []byte) ([]byte, error) {
+	buffer := gopacket.NewSerializeBuffer()
+	payload := gopacket.Payload(data)
+	ip := &layers.IPv4{
+		DstIP:    dst.IP,
+		SrcIP:    src.IP,
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+	}
+	udp := &layers.UDP{
+		SrcPort: layers.UDPPort(src.Port),
+		DstPort: layers.UDPPort(dst.Port),
+	}
+	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
+		return nil, fmt.Errorf("failed calc checksum: %s", err)
+	}
+	if err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{ComputeChecksums: true, FixLengths: true}, ip, udp, payload); err != nil {
+		return nil, fmt.Errorf("failed serialize packet: %s", err)
+	}
+	return buffer.Bytes(), nil
+}
+
+func downlink(socket *net.UDPConn, appClient, appServer *net.UDPAddr, ifce *water.Interface) {
+	for {
+		data := make([]byte, 1500)
+		_, err := socket.Read(data)
+		if err != nil {
+			fmt.Println("UDP socket read err")
+		}
+
+		UDPpacket, err := buildUDPPacket(appClient, appServer, data)
+		if err != nil {
+			fmt.Println("buildUDPPacket err")
+		} else {
+			_, err := ifce.Write(UDPpacket)
+			if err != nil {
+				fmt.Println("ifce write err")
+			}
+		}
+	}
 }
 
 func execCommand(cmd *exec.Cmd) {

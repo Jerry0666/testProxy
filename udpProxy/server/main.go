@@ -33,9 +33,13 @@ func Server() error {
 	}
 
 	data := make([]byte, 1472)
+	set := false
 	for {
-
-		n, _, _ := listen.ReadFromUDP(data)
+		n, addr, _ := listen.ReadFromUDP(data)
+		if !set {
+			go downlink(socket, listen, addr)
+			set = true
+		}
 		_, err = socket.Write(data[:n])
 		if err != nil {
 			fmt.Printf("udp write err. %v\n", err)
@@ -43,4 +47,18 @@ func Server() error {
 
 	}
 
+}
+
+func downlink(socket *net.UDPConn, listen *net.UDPConn, addr *net.UDPAddr) {
+	for {
+		data := make([]byte, 1024)
+		n, err := socket.Read(data)
+		if err != nil {
+			fmt.Println("socket read err")
+		}
+		_, err = listen.WriteToUDP(data[:n], addr)
+		if err != nil {
+			fmt.Println("write udp err")
+		}
+	}
 }
